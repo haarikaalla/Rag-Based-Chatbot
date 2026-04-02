@@ -10,3 +10,5 @@ This is a Streamlit-based chatbot that answers questions strictly from a PDF doc
 ```bash
 git clone https://github.com/haarikaalla/Rag-Based-Chatbot.git
 cd Rag-Based-Chatbot
+pip install -r requirements.txt
+python -m streamlit run pdfs/app.py
