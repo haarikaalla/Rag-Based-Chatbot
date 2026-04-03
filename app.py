@@ -13,6 +13,7 @@ st.header("🛡️ Strict Healthcare PDF Chatbot")
 with st.sidebar:
     st.title("Control Panel")
     file = st.file_uploader("Upload Healthcare PDF", type=["pdf"])
+    # 1.4 is a good balance for finding synonyms without guessing
     threshold = st.slider("Strictness (Lower = More Strict)", 0.5, 2.0, 1.4)
     if st.button("Reset Bot"):
         st.cache_resource.clear()
@@ -29,7 +30,7 @@ def process_pdf(file_bytes):
     if not text.strip():
         return None
 
-    # Micro-chunks to keep diseases separate
+    # VERY small chunks (150) to separate "Fever" from "Cold"
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=150, 
         chunk_overlap=0,
@@ -47,31 +48,40 @@ if file is not None:
     
     if vector_store:
         st.sidebar.success("✅ PDF Loaded")
-        query = st.text_input("Ask a question strictly from the document:")
+        query = st.text_input("Ask a question (e.g., 'What is Fever?'):")
 
         if query:
+            # Search for the best match
             results = vector_store.similarity_search_with_score(query, k=1)
             
             if results:
                 best_doc, score = results[0]
 
                 if score < threshold:
+                    # EXTRA FILTER: Only show sentences that match the query keyword
                     content = best_doc.page_content.replace('\n', ' ')
                     sentences = content.split('. ')
                     
-                    # Sentence Filter: Ensures ONLY the relevant disease shows up
+                    # Filter sentences to only show the ones related to the query
                     filtered_sentences = [s for s in sentences if query.lower() in s.lower() or any(word in s.lower() for word in query.lower().split())]
                     
                     st.subheader("Answer from PDF:")
                     if filtered_sentences:
+                        # Join matching sentences back together
                         final_answer = ". ".join(filtered_sentences).strip()
                         if not final_answer.endswith('.'): final_answer += "."
                         st.success(final_answer)
                     else:
+                        # Fallback if keyword match is tricky but similarity is high
                         st.success(content.strip())
+                        
+                    with st.expander("Confidence Metrics"):
+                        st.write(f"Match Distance: {round(score, 4)}")
                 else:
                     st.warning("Bot: Information not found in document.")
             else:
                 st.error("No matches found.")
+    else:
+        st.error("Could not read PDF text.")
 else:
     st.info("Please upload your healthcare.pdf to start.")
