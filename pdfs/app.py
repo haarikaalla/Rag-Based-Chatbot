@@ -1,76 +1,87 @@
-# pdf_chatbot_strict_streamlit.py
-
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
 import streamlit as st
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import CharacterTextSplitter
-from langchain_community.vectorstores import FAISS
+import fitz  # PyMuPDF
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_ollama import OllamaLLM
+from langchain_community.vectorstores import FAISS
 
-st.title("Healthcare PDF Chatbot")
-st.write("Ask questions strictly based on the PDF content. Answers come only from the PDF.")
+# ------------------ UI ------------------
+st.set_page_config(page_title="Strict PDF Chatbot", layout="wide")
+st.header("🛡️ Strict Healthcare PDF Chatbot")
 
-# ---------------------------
-# Load PDF, split, create FAISS and LLM
-# ---------------------------
-@st.cache_resource(show_spinner=True)
-def load_pdf():
-    loader = PyPDFLoader("pdfs/healthcare.pdf")
-    documents = loader.load()
-    st.write(f"Loaded docs: {len(documents)}")
+with st.sidebar:
+    st.title("Control Panel")
+    file = st.file_uploader("Upload Healthcare PDF", type=["pdf"])
+    # 1.4 is a good balance for finding synonyms without guessing
+    threshold = st.slider("Strictness (Lower = More Strict)", 0.5, 2.0, 1.4)
+    if st.button("Reset Bot"):
+        st.cache_resource.clear()
+        st.rerun()
+
+# ------------------ Process PDF ------------------
+@st.cache_resource
+def process_pdf(file_bytes):
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    text = ""
+    for page in doc:
+        text += page.get_text()
     
-    # Split text into chunks (with overlap to not miss information)
-    splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=150)
-    docs = splitter.split_documents(documents)
-    st.write(f"Split docs: {len(docs)}")
-    
-    # Create embeddings
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
-    db = FAISS.from_documents(docs, embeddings)
-    
-    # Load LLM
-    llm = OllamaLLM(model="phi")
-    
-    return db, llm
+    if not text.strip():
+        return None
 
-db, llm = load_pdf()
+    # VERY small chunks (150) to separate "Fever" from "Cold"
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=150, 
+        chunk_overlap=0,
+        separators=["\n", ". "]
+    )
+    chunks = text_splitter.split_text(text)
+    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    vector_store = FAISS.from_texts(chunks, embeddings)
+    return vector_store
 
-# ---------------------------
-# System prompt - STRICT PDF only
-# ---------------------------
-system_prompt = """
-You are a strict assistant.
-Answer ONLY using the information provided in the Context below.
-Include **everything from the Context exactly as it appears**.
-Do NOT summarize, interpret, or add any extra information.
-Do NOT use outside knowledge.
-If the Context does not contain the answer, reply exactly: 'Not found in document'.
-"""
-
-# ---------------------------
-# Query input
-# ---------------------------
-query = st.text_input("Type your question here:")
-
-if query:
-    # Retrieve top 3 relevant chunks to ensure all details are captured
-    results = db.similarity_search(query, k=3)
+# ------------------ Main Bot Logic ------------------
+if file is not None:
+    file_bytes = file.read()
+    vector_store = process_pdf(file_bytes)
     
-    if not results:
-        st.write("Bot: Not found in document")
+    if vector_store:
+        st.sidebar.success("✅ PDF Loaded")
+        query = st.text_input("Ask a question (e.g., 'What is Fever?'):")
+
+        if query:
+            # Search for the best match
+            results = vector_store.similarity_search_with_score(query, k=1)
+            
+            if results:
+                best_doc, score = results[0]
+
+                if score < threshold:
+                    # EXTRA FILTER: Only show sentences that match the query keyword
+                    content = best_doc.page_content.replace('\n', ' ')
+                    sentences = content.split('. ')
+                    
+                    # Filter sentences to only show the ones related to the query
+                    filtered_sentences = [s for s in sentences if query.lower() in s.lower() or any(word in s.lower() for word in query.lower().split())]
+                    
+                    st.subheader("Answer from PDF:")
+                    if filtered_sentences:
+                        # Join matching sentences back together
+                        final_answer = ". ".join(filtered_sentences).strip()
+                        if not final_answer.endswith('.'): final_answer += "."
+                        st.success(final_answer)
+                    else:
+                        # Fallback if keyword match is tricky but similarity is high
+                        st.success(content.strip())
+                        
+                    with st.expander("Confidence Metrics"):
+                        st.write(f"Match Distance: {round(score, 4)}")
+                else:
+                    st.warning("Bot: Information not found in document.")
+            else:
+                st.error("No matches found.")
     else:
-        # Combine all relevant chunks into one context
-        context = "\n".join([doc.page_content for doc in results])
-        
-        # Build the prompt for LLM
-        prompt = f"""
-{system_prompt}
-
-Context:
-{context}
-
-Question: {query}
-"""
-        # Call LLM
-        response = llm.invoke(prompt).strip()
-        st.write("Bot:", response)
+        st.error("Could not read PDF text.")
+else:
+    st.info("Please upload your healthcare.pdf to start.")
